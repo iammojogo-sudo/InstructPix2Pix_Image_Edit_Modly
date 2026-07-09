@@ -44,6 +44,13 @@
           "tooltip": "ONLY edit the detected object (OFF = full image, old behavior)"
         },
         {
+          "id": "target",
+          "label": "Mask Target (optional)",
+          "type": "string",
+          "default": "",
+          "tooltip": "Override: type the object name directly (e.g. 'skin', 'shirt'). Leave empty to auto-extract from instruction."
+        },
+        {
           "id": "steps",
           "label": "Steps",
           "type": "int",

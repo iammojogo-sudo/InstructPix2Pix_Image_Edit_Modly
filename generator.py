@@ -109,17 +109,15 @@ class InstructPix2PixGenerator(BaseGenerator):
 
         auto_mask = params.get("auto_mask", "on") == "on"
 
-        manual_target = params.get("target", "").strip()
-
         src = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
         orig_size = src.size
 
         # ---- Step 1: Auto-mask via CLIPSeg ----
         mask_img = None
         if auto_mask:
-            search_text = manual_target or prompt
-            self._report(progress_cb, 5, f"Generating mask for '{search_text}'...")
-            mask_np = self._text_to_mask(src, search_text, cancel_event)
+            target = params.get("target", "").strip() or self._extract_target(prompt)
+            self._report(progress_cb, 5, f"Generating mask for '{target}'...")
+            mask_np = self._text_to_mask(src, target, cancel_event)
             mask_img = PILImage.fromarray(mask_np, mode="L")
             mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=5))
 
@@ -172,7 +170,32 @@ class InstructPix2PixGenerator(BaseGenerator):
             return paths[0]
         return paths
 
+    @staticmethod
+    def _extract_target(prompt: str) -> str:
+        prompt = prompt.strip().lower()
+        skip_words = [
+            "the", "my", "this", "that", "his", "her", "their", "your", "our", "its", "a", "an",
+        ]
+        skip_words.sort(key=len, reverse=True)
+        skip = r"(?:" + "|".join(skip_words) + r")"
+        patterns = [
+            rf"(?:make|turn|change|paint|color|replace)\s+{skip}\s+(\w+)",
+            rf"(?:make|turn|change|paint|color|replace)\s+(\w+)",
+            rf"(\w+)\s+(?:into|to|as)\s+\w+",
+        ]
+        for pat in patterns:
+            m = re.search(pat, prompt)
+            if m:
+                return m.group(1)
+        return prompt.split()[0] if prompt else ""
+
     def _text_to_mask(
+        self, image: PILImage.Image, text: str, cancel_event: threading.Event
+    ) -> np.ndarray:
+        self._check_cancelled(cancel_event)
+        inputs = self._clipseg_processor(
+            text=[text], images=[image], padding="max_length", return_tensors="pt"
+        ).to(self._clipseg.device)
         self, image: PILImage.Image, text: str, cancel_event: threading.Event
     ) -> np.ndarray:
         self._check_cancelled(cancel_event)
