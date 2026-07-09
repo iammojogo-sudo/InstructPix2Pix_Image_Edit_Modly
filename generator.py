@@ -15,22 +15,20 @@ class InstructPix2PixGenerator(BaseGenerator):
     DISPLAY_NAME = "InstructPix2Pix Edit"
     VRAM_GB = 4
 
-    def is_downloaded(self) -> bool:
-        return True
-
     def load(self) -> None:
         cb = getattr(self, "_progress", None)
         self._report(cb, 5, "Loading InstructPix2Pix…")
 
         from diffusers import StableDiffusionInstructPix2PixPipeline
 
-        repo = self.MODEL_ID
+        repo = str(self.model_dir)
 
         self._report(cb, 40, "Loading pipeline…")
         pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
             repo,
             torch_dtype=torch.float16,
             use_safetensors=True,
+            local_files_only=True,
         )
 
         self._report(cb, 70, "Optimizing…")
