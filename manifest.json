@@ -2,7 +2,7 @@
   "id": "instructpix2pix_edit",
   "name": "InstructPix2Pix Edit",
   "type": "model",
-  "source": "",
+  "source": "https://github.com/iammojogo-sudo/InstructPix2Pix_Image_Edit_Modly",
   "description": "Instruction-based image editing with InstructPix2Pix. Provide an image and a text instruction (e.g. 'make it a oil painting', 'turn the dog into a cat') and get an edited image back. Fits 4-6GB VRAM.",
   "version": "1.0.0",
   "author": "iammojogo",
