@@ -204,29 +204,24 @@ class InstructPix2PixGenerator(BaseGenerator):
         negative: Optional[str] = None,
     ) -> np.ndarray:
         self._check_cancelled(cancel_event)
-        texts = [text]
+
+        def _run(t: str) -> np.ndarray:
+            inputs = self._clipseg_processor(
+                text=[t], images=[image], padding=True, return_tensors="pt"
+            ).to(self._clipseg.device)
+            with torch.inference_mode():
+                outputs = self._clipseg(**inputs)
+            probs = torch.sigmoid(outputs.logits)
+            probs = torch.nn.functional.interpolate(
+                probs, size=(image.height, image.width), mode="bilinear"
+            )
+            return probs.squeeze().cpu().numpy().astype(np.float32)
+
+        pos = _run(text)
         if negative:
-            texts.append(negative)
-
-        inputs = self._clipseg_processor(
-            text=texts, images=[image], padding=True, return_tensors="pt"
-        ).to(self._clipseg.device)
-
-        with torch.inference_mode():
-            outputs = self._clipseg(**inputs)
-
-        # outputs.logits: [1, N, H', W']  where N = len(texts)
-        logits = outputs.logits.squeeze(0)  # [N, H', W']
-
-        if negative and len(texts) > 1:
-            logits = logits[0] - logits[1]
-
-        probs = torch.sigmoid(logits)
-        probs = probs.unsqueeze(0).unsqueeze(0)
-        probs = torch.nn.functional.interpolate(
-            probs, size=(image.height, image.width), mode="bilinear"
-        )
-        return probs.squeeze().cpu().numpy().astype(np.float32)
+            neg = _run(negative)
+            pos = np.clip(pos - neg, 0, 1)
+        return pos
 
     @staticmethod
     def _refine_mask_by_color(
