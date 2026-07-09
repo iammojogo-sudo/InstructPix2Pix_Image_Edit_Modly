@@ -107,13 +107,7 @@ class InstructPix2PixGenerator(BaseGenerator):
         num_images = int(params.get("num_images", 1))
         seed = int(params.get("seed", 0))
 
-        auto_mask_raw = params.get("auto_mask", True)
-        if isinstance(auto_mask_raw, str):
-            auto_mask = auto_mask_raw.lower() in ("true", "1", "yes", "on")
-        elif isinstance(auto_mask_raw, bool):
-            auto_mask = auto_mask_raw
-        else:
-            auto_mask = bool(auto_mask_raw)
+        auto_mask = params.get("auto_mask", "on") == "on"
 
         manual_target = params.get("target", "").strip()
 

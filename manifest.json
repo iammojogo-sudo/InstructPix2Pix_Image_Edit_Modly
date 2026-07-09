@@ -35,9 +35,13 @@
         {
           "id": "auto_mask",
           "label": "Auto-Mask Region",
-          "type": "bool",
-          "default": true,
-          "tooltip": "ONLY edit the detected object (OFF = global edit, old behavior)"
+          "type": "select",
+          "default": "on",
+          "options": [
+            {"label": "On (local edit)", "value": "on"},
+            {"label": "Off (global edit)", "value": "off"}
+          ],
+          "tooltip": "ONLY edit the detected object (OFF = full image, old behavior)"
         },
         {
           "id": "steps",
