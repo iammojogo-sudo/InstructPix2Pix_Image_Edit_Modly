@@ -27,11 +27,27 @@ class InstructPix2PixGenerator(BaseGenerator):
     def _auto_download(self) -> None:
         from huggingface_hub import snapshot_download
 
+        # Download IP2P model to root of model_dir
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id=self.MODEL_ID,
+            local_dir=str(self.model_dir),
+            ignore_patterns=["*.md", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"],
+        )
+        # Remove corrupt safetensors files so loader falls back to .bin
+        for safetensors_file in self.model_dir.rglob("*.safetensors"):
+            bin_file = safetensors_file.with_suffix(".bin")
+            if bin_file.exists():
+                ratio = safetensors_file.stat().st_size / bin_file.stat().st_size
+                if ratio < 0.5:
+                    print(f"[_auto_download] Removing corrupt safetensors: {safetensors_file.name} ({safetensors_file.stat().st_size} bytes, {ratio:.1%} of .bin)")
+                    safetensors_file.unlink()
+
+        # Download G-DINO + SAM to subdirectories
         repos = {
             "grounding_dino": "IDEA-Research/grounding-dino-base",
             "sam": "facebook/sam-vit-base",
         }
-        # Only download G-DINO + SAM; IP2P is downloaded by the base if needed
         for subdir, repo_id in repos.items():
             target_dir = self.model_dir / subdir
             if target_dir.exists() and any(target_dir.iterdir()):
@@ -59,7 +75,6 @@ class InstructPix2PixGenerator(BaseGenerator):
         self._pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
             str(self.model_dir),
             torch_dtype=torch.float16,
-            use_safetensors=True,
             local_files_only=True,
         )
         self._pipe.enable_attention_slicing()
