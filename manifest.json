@@ -35,9 +35,16 @@
         {
           "id": "auto_mask",
           "label": "Auto-Mask Region",
-          "type": "boolean",
+          "type": "bool",
           "default": true,
           "tooltip": "ONLY edit the detected object (OFF = global edit, old behavior)"
+        },
+        {
+          "id": "target",
+          "label": "Target (optional)",
+          "type": "string",
+          "default": "",
+          "tooltip": "Force-detect a specific object (e.g. 'pants'). Leave empty for auto-detect."
         },
         {
           "id": "steps",

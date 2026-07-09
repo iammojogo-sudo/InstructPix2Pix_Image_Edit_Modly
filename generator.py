@@ -127,7 +127,16 @@ class InstructPix2PixGenerator(BaseGenerator):
         image_guidance = float(params.get("image_guidance_scale", 2.5))
         num_images = int(params.get("num_images", 1))
         seed = int(params.get("seed", 0))
-        auto_mask = params.get("auto_mask", True)
+
+        auto_mask_raw = params.get("auto_mask", True)
+        if isinstance(auto_mask_raw, str):
+            auto_mask = auto_mask_raw.lower() in ("true", "1", "yes", "on")
+        elif isinstance(auto_mask_raw, bool):
+            auto_mask = auto_mask_raw
+        else:
+            auto_mask = bool(auto_mask_raw)
+
+        manual_target = params.get("target", "").strip()
 
         src = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
         orig_size = src.size
@@ -135,11 +144,14 @@ class InstructPix2PixGenerator(BaseGenerator):
         # ---- Step 1: Auto-mask (if enabled) ----
         mask_img = None
         if auto_mask:
-            boxes = self._detect(src, prompt, cancel_event, threshold=0.2)
-            if not boxes:
-                target = self._extract_target(prompt)
-                if target and target != prompt:
-                    boxes = self._detect(src, target, cancel_event, threshold=0.15)
+            if manual_target:
+                boxes = self._detect(src, manual_target, cancel_event, threshold=0.1)
+            else:
+                boxes = self._detect(src, prompt, cancel_event, threshold=0.15)
+                if not boxes:
+                    target = self._extract_target(prompt)
+                    if target and target != prompt:
+                        boxes = self._detect(src, target, cancel_event, threshold=0.05)
 
             if boxes:
                 self._report(progress_cb, 10, "Segmenting region...")
