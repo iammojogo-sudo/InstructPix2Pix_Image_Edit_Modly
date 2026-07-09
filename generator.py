@@ -7,6 +7,7 @@ from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image as PILImage, ImageFilter
 
 from services.generators.base import BaseGenerator, GenerationCancelled
@@ -15,18 +16,22 @@ from services.generators.base import BaseGenerator, GenerationCancelled
 class InstructPix2PixGenerator(BaseGenerator):
     MODEL_ID = "timbrooks/instruct-pix2pix"
     DISPLAY_NAME = "InstructPix2Pix Edit"
-    VRAM_GB = 5
+    VRAM_GB = 6
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._clipseg = None
-        self._clipseg_processor = None
+        self._pipe = None
+        self._sam = None
+        self._sam_processor = None
+        self._clip = None
+        self._clip_processor = None
 
     def _auto_download(self) -> None:
         from huggingface_hub import snapshot_download
 
-        # Download IP2P model
         self.model_dir.mkdir(parents=True, exist_ok=True)
+
+        # Download IP2P model
         snapshot_download(
             repo_id=self.MODEL_ID,
             local_dir=str(self.model_dir),
@@ -39,19 +44,29 @@ class InstructPix2PixGenerator(BaseGenerator):
                 if ratio < 0.5:
                     f.unlink()
 
-        # Download CLIPSeg (text-to-mask model)
-        clipseg_dir = self.model_dir / "clipseg"
-        clipseg_dir.mkdir(parents=True, exist_ok=True)
+        # Download SAM (mask proposal)
+        sam_dir = self.model_dir / "sam"
+        sam_dir.mkdir(parents=True, exist_ok=True)
         snapshot_download(
-            repo_id="CIDAS/clipseg-rd64-refined",
-            local_dir=str(clipseg_dir),
+            repo_id="facebook/sam-vit-base",
+            local_dir=str(sam_dir),
+            ignore_patterns=["*.md", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"],
+        )
+
+        # Download CLIP (text-to-mask scoring)
+        clip_dir = self.model_dir / "clip"
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id="openai/clip-vit-base-patch32",
+            local_dir=str(clip_dir),
             ignore_patterns=["*.md", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"],
         )
 
     def is_downloaded(self) -> bool:
         ip2p_ok = (self.model_dir / "model_index.json").exists()
-        clipseg_ok = (self.model_dir / "clipseg").exists() and any((self.model_dir / "clipseg").iterdir())
-        return ip2p_ok and clipseg_ok
+        sam_ok = (self.model_dir / "sam").exists() and any((self.model_dir / "sam").iterdir())
+        clip_ok = (self.model_dir / "clip").exists() and any((self.model_dir / "clip").iterdir())
+        return ip2p_ok and sam_ok and clip_ok
 
     def load(self) -> None:
         cb = getattr(self, "_progress", None)
@@ -70,19 +85,28 @@ class InstructPix2PixGenerator(BaseGenerator):
         self._pipe.vae.enable_tiling()
         self._pipe.to(device)
 
-        self._report(cb, 50, "Loading CLIPSeg...")
-        from transformers import AutoProcessor, CLIPSegForImageSegmentation
+        self._report(cb, 30, "Loading SAM...")
+        from transformers import SamModel, SamProcessor
 
-        clipseg_path = str(self.model_dir / "clipseg")
-        self._clipseg = CLIPSegForImageSegmentation.from_pretrained(clipseg_path, local_files_only=True).to(device)
-        self._clipseg_processor = AutoProcessor.from_pretrained(clipseg_path, local_files_only=True)
+        sam_path = str(self.model_dir / "sam")
+        self._sam = SamModel.from_pretrained(sam_path, local_files_only=True).to(device)
+        self._sam_processor = SamProcessor.from_pretrained(sam_path, local_files_only=True)
+
+        self._report(cb, 60, "Loading CLIP...")
+        from transformers import CLIPModel, CLIPProcessor
+
+        clip_path = str(self.model_dir / "clip")
+        self._clip = CLIPModel.from_pretrained(clip_path, local_files_only=True).to(device)
+        self._clip_processor = CLIPProcessor.from_pretrained(clip_path, local_files_only=True)
 
         self._report(cb, 100, "Ready")
 
     def unload(self) -> None:
         self._pipe = None
-        self._clipseg = None
-        self._clipseg_processor = None
+        self._sam = None
+        self._sam_processor = None
+        self._clip = None
+        self._clip_processor = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -108,26 +132,16 @@ class InstructPix2PixGenerator(BaseGenerator):
         seed = int(params.get("seed", 0))
 
         auto_mask = params.get("auto_mask", "on") == "on"
-        mask_threshold = float(params.get("mask_threshold", 0.3))
-        color_tolerance = int(params.get("color_tolerance", 0))
-        mask_negative = params.get("mask_negative", "").strip() or None
 
         src = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
         orig_size = src.size
-        src_array = np.array(src)
 
-        # ---- Step 1: Auto-mask via CLIPSeg ----
+        # ---- Step 1: Auto-mask via SAM + CLIP ----
         mask_img = None
         if auto_mask:
             target = params.get("target", "").strip() or self._extract_target(prompt)
-            self._report(progress_cb, 5, f"Generating mask for '{target}'...")
-            probs = self._text_to_mask(src, target, cancel_event, negative=mask_negative)
-
-            if color_tolerance > 0:
-                mask_np = self._refine_mask_by_color(src_array, probs, color_tolerance)
-            else:
-                mask_np = (probs > mask_threshold).astype(np.uint8) * 255
-
+            self._report(progress_cb, 5, f"Searching for '{target}'...")
+            mask_np = self._find_mask(src, target, cancel_event)
             mask_img = PILImage.fromarray(mask_np, mode="L")
             mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=5))
 
@@ -199,50 +213,117 @@ class InstructPix2PixGenerator(BaseGenerator):
                 return m.group(1)
         return prompt.split()[0] if prompt else ""
 
-    def _text_to_mask(
-        self, image: PILImage.Image, text: str, cancel_event: threading.Event,
-        negative: Optional[str] = None,
+    def _find_mask(
+        self, image: PILImage.Image, target: str, cancel_event: threading.Event
     ) -> np.ndarray:
         self._check_cancelled(cancel_event)
+        device = self._sam.device
+        h, w = image.height, image.width
+        clip_size = 224
 
-        def _run(t: str) -> np.ndarray:
-            inputs = self._clipseg_processor(
-                text=[t], images=[image], padding=True, return_tensors="pt"
-            ).to(self._clipseg.device)
+        # ---- 1. Preprocess image (keeps size info for post-processing) ----
+        inputs = self._sam_processor(image, return_tensors="pt").to(device)
+        original_sizes = inputs["original_sizes"].cpu()
+        reshaped_input_sizes = inputs["reshaped_input_sizes"].cpu()
+
+        with torch.inference_mode():
+            image_embeddings = self._sam.vision_encoder(inputs["pixel_values"]).last_hidden_state
+
+        # ---- 2. Grid point prompts (in original coordinates, scaled by processor) ----
+        step = max(32, min(h, w) // 32)
+        ys = torch.arange(step // 2, h, step, device=device)
+        xs = torch.arange(step // 2, w, step, device=device)
+        grid_ys, grid_xs = torch.meshgrid(ys, xs, indexing="ij")
+        points = torch.stack([grid_xs.flatten(), grid_ys.flatten()], dim=1).float()
+
+        if len(points) == 0:
+            return np.ones((h, w), dtype=np.uint8) * 255
+
+        # ---- 3. Generate mask proposals ----
+        all_masks = []
+        all_scores = []
+        batch_size = 64
+
+        for i in range(0, len(points), batch_size):
+            self._check_cancelled(cancel_event)
+            batch_pts = points[i:i+batch_size]
+
+            # Use processor to scale points from original coords to SAM input space
+            proc = self._sam_processor(image, input_points=[batch_pts.tolist()], return_tensors="pt").to(device)
+            scaled_pts = proc["input_points"][0].unsqueeze(1)  # [B, 1, 2]
+            batch_lbls = torch.ones(scaled_pts.shape[0], 1, device=device)
+
             with torch.inference_mode():
-                outputs = self._clipseg(**inputs)
-            probs = torch.sigmoid(outputs.logits).squeeze()
-            probs = probs.unsqueeze(0).unsqueeze(0)
-            probs = torch.nn.functional.interpolate(
-                probs, size=(image.height, image.width), mode="bilinear"
-            )
-            return probs.squeeze().cpu().numpy().astype(np.float32)
+                outputs = self._sam(
+                    pixel_values=None,
+                    input_points=scaled_pts,
+                    input_labels=batch_lbls,
+                    image_embeddings=image_embeddings.expand(scaled_pts.shape[0], -1, -1, -1),
+                    multimask_output=True,
+                )
+            all_masks.append(outputs.pred_masks.cpu().float())
+            all_scores.append(outputs.iou_scores.cpu())
 
-        pos = _run(text)
-        if negative:
-            neg = _run(negative)
-            pos = np.clip(pos - neg, 0, 1)
-        return pos
+        masks = torch.cat(all_masks, dim=0)
+        iou_scores = torch.cat(all_scores, dim=0)
 
-    @staticmethod
-    def _refine_mask_by_color(
-        src_array: np.ndarray, probs: np.ndarray, tolerance: int
-    ) -> np.ndarray:
-        region = probs > 0.05
-        if not region.any():
-            return (probs > 0.3).astype(np.uint8) * 255
+        N, M, Hm, Wm = masks.shape
+        masks = masks.view(N * M, Hm, Wm)
+        iou_scores = iou_scores.view(N * M)
 
-        high_conf = probs > max(np.percentile(probs[region], 90), 0.3)
-        if high_conf.sum() < 10:
-            return (probs > 0.3).astype(np.uint8) * 255
+        # ---- 4. Filter by SAM's predicted IoU ----
+        keep = iou_scores > 0.3
+        if keep.any():
+            masks = masks[keep]
+        if len(masks) == 0:
+            return np.ones((h, w), dtype=np.uint8) * 255
 
-        target_color = np.median(src_array[high_conf], axis=0).astype(int)
-        color_dist = np.max(
-            np.abs(src_array.astype(int) - target_color[None, None, :]), axis=2
+        # ---- 5. CLIP text encoding (once) ----
+        text_inputs = self._clip_processor(text=[target], return_tensors="pt", padding=True).to(device)
+        with torch.inference_mode():
+            text_features = self._clip.get_text_features(**text_inputs)
+        text_features = F.normalize(text_features, dim=-1)
+
+        # ---- 6. Score each mask with CLIP ----
+        image_clip = image.resize((clip_size, clip_size), PILImage.LANCZOS)
+        blurred_clip = image_clip.filter(ImageFilter.GaussianBlur(radius=5))
+
+        best_mask_logits = None
+        best_score = -1.0
+        clip_batch = 32
+
+        for i in range(0, len(masks), clip_batch):
+            self._check_cancelled(cancel_event)
+            batch_logits = masks[i:i+clip_batch]
+
+            crops = []
+            for j in range(len(batch_logits)):
+                prob = torch.sigmoid(batch_logits[j])
+                prob = F.interpolate(prob[None, None], size=(clip_size, clip_size), mode="bilinear").squeeze()
+                msk_pil = PILImage.fromarray((prob.numpy() * 255).astype(np.uint8), mode="L")
+                crops.append(PILImage.composite(image_clip, blurred_clip, msk_pil))
+
+            img_inputs = self._clip_processor(images=crops, return_tensors="pt", padding=True).to(device)
+            with torch.inference_mode():
+                img_features = self._clip.get_image_features(**img_inputs)
+            img_features = F.normalize(img_features, dim=-1)
+
+            clip_scores = (img_features @ text_features.T).squeeze(-1)
+            batch_best = clip_scores.argmax().item()
+            if clip_scores[batch_best] > best_score:
+                best_score = clip_scores[batch_best].item()
+                best_mask_logits = batch_logits[batch_best].cpu()
+
+        if best_mask_logits is None:
+            return np.ones((h, w), dtype=np.uint8) * 255
+
+        # ---- 7. Post-process mask to original resolution (handles padding/crop) ----
+        best_mask_batch = best_mask_logits.unsqueeze(0).unsqueeze(0)  # [1, 1, 256, 256]
+        masks_pp = self._sam_processor.image_processor.post_process_masks(
+            best_mask_batch, original_sizes, reshaped_input_sizes
         )
-        color_match = color_dist < tolerance
-        refined = color_match & region
-        return (refined.astype(np.uint8) * 255)
+        mask_np = torch.sigmoid(masks_pp[0][0]).numpy()
+        return (mask_np * 255).astype(np.uint8)
 
     def _report(self, cb, pct, msg):
         if cb:

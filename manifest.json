@@ -3,17 +3,19 @@
   "name": "InstructPix2Pix Edit",
   "type": "model",
   "source": "https://github.com/iammojogo-sudo/InstructPix2Pix_Image_Edit_Modly",
-  "description": "Instruction-based image editing with CLIPSeg auto-masking. Upload an image and describe what to change (e.g. 'make the pants green'). CLIPSeg generates a mask from your text, then only that region is edited — everything else stays pixel-identical.",
-  "version": "3.1.0",
+  "description": "Instruction-based image editing with SAM + CLIP auto-masking. Upload an image and describe what to change. SAM generates every possible region mask, CLIP picks the one matching your target — no tuning needed. Only the detected region is edited; everything else stays pixel-identical.",
+  "version": "4.0.0",
   "author": "iammojogo",
-  "vram_gb": 5,
+  "vram_gb": 6,
   "tags": [
     "image-to-image",
     "image-editing",
     "instructpix2pix",
     "auto-mask",
     "local-editing",
-    "i2i"
+    "i2i",
+    "sam",
+    "clip"
   ],
   "nodes": [
     {
@@ -41,39 +43,14 @@
             {"label": "On (local edit)", "value": "on"},
             {"label": "Off (global edit)", "value": "off"}
           ],
-          "tooltip": "ONLY edit the detected object (OFF = full image, old behavior)"
+          "tooltip": "ONLY edit the detected object (OFF = full image)"
         },
         {
           "id": "target",
           "label": "Mask Target (optional)",
           "type": "string",
           "default": "",
-          "tooltip": "Override: type the object name directly (e.g. 'skin', 'shirt'). Leave empty to auto-extract from instruction."
-        },
-        {
-          "id": "mask_threshold",
-          "label": "Mask Sensitivity",
-          "type": "float",
-          "default": 0.3,
-          "min": 0.05,
-          "max": 0.9,
-          "tooltip": "Lower = more sensitive mask (catches faint regions). 0.3 default, 0.05 for blocky/stylized characters."
-        },
-        {
-          "id": "color_tolerance",
-          "label": "Color Snap (0=off)",
-          "type": "int",
-          "default": 0,
-          "min": 0,
-          "max": 100,
-          "tooltip": "Snap mask to matching pixels. 0=disabled, 20-40 for flat-color characters (Roblox)."
-        },
-        {
-          "id": "mask_negative",
-          "label": "Exclude (optional)",
-          "type": "string",
-          "default": "",
-          "tooltip": "Exclude this concept (e.g. 'arms' to isolate hands from arms, 'background' to cut out subject)"
+          "tooltip": "Override: type the object name directly. Leave empty to auto-extract from instruction."
         },
         {
           "id": "steps",
@@ -99,7 +76,7 @@
           "default": 1.5,
           "min": 0.5,
           "max": 5.0,
-          "tooltip": "Lower = more creative edits (auto-mask hides global tint)"
+          "tooltip": "Lower = more creative edits"
         },
         {
           "id": "num_images",
