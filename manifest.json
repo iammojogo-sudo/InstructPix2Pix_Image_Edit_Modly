@@ -51,10 +51,10 @@
           "id": "image_guidance_scale",
           "label": "Image Guidance",
           "type": "float",
-          "default": 1.5,
+          "default": 2.5,
           "min": 0.5,
           "max": 5.0,
-          "tooltip": "How much to preserve the original image"
+          "tooltip": "How much to preserve the original image (higher = less global tint)"
         },
         {
           "id": "num_images",

@@ -81,7 +81,7 @@ class InstructPix2PixGenerator(BaseGenerator):
 
         steps = int(params.get("steps", 30))
         guidance_scale = float(params.get("guidance_scale", 7.5))
-        image_guidance = float(params.get("image_guidance_scale", 1.5))
+        image_guidance = float(params.get("image_guidance_scale", 2.5))
         num_images = int(params.get("num_images", 1))
         seed = int(params.get("seed", 0))
 
@@ -122,7 +122,7 @@ class InstructPix2PixGenerator(BaseGenerator):
             filename = f"ip2p_edit_{self._timestamp()}_{i}.png"
             out_path = self.outputs_dir / filename
             img.save(str(out_path), "PNG")
-            paths.append(str(out_path))
+            paths.append(out_path)
 
         self._report(progress_cb, 100, "Done")
 
