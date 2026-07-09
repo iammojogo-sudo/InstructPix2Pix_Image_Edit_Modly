@@ -15,23 +15,36 @@ class InstructPix2PixGenerator(BaseGenerator):
     DISPLAY_NAME = "InstructPix2Pix Edit"
     VRAM_GB = 4
 
+    # ---- download (mirrors the working extensions in this install) ----
+    def _auto_download(self) -> None:
+        from huggingface_hub import snapshot_download
+
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        # Download the FULL diffusers repo into the LOCAL model_dir.
+        # We pass local_dir=model_dir so nothing touches the poisoned
+        # ~/.cache/huggingface hub cache. snapshot_download writes
+        # the component subfolders (unet/, vae/, text_encoder/, ...) here.
+        snapshot_download(
+            repo_id=self.MODEL_ID,
+            local_dir=str(self.model_dir),
+            ignore_patterns=["*.md", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"],
+        )
+
     def load(self) -> None:
         cb = getattr(self, "_progress", None)
-        self._report(cb, 5, "Loading InstructPix2Pix…")
+        self._report(cb, 5, "Loading InstructPix2Pix...")
 
         from diffusers import StableDiffusionInstructPix2PixPipeline
 
-        repo = str(self.model_dir)
-
-        self._report(cb, 40, "Loading pipeline…")
+        self._report(cb, 40, "Loading pipeline...")
         pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-            repo,
+            str(self.model_dir),
             torch_dtype=torch.float16,
             use_safetensors=True,
             local_files_only=True,
         )
 
-        self._report(cb, 70, "Optimizing…")
+        self._report(cb, 70, "Optimizing...")
         pipe.enable_attention_slicing()
         pipe.vae.enable_slicing()
         pipe.vae.enable_tiling()
@@ -78,7 +91,7 @@ class InstructPix2PixGenerator(BaseGenerator):
 
         init_image = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        self._report(progress_cb, 10, "Editing…")
+        self._report(progress_cb, 10, "Editing...")
 
         def step_callback(pipe, step, timestep, callback_kwargs):
             self._check_cancelled(cancel_event)
@@ -102,7 +115,7 @@ class InstructPix2PixGenerator(BaseGenerator):
 
         self._check_cancelled(cancel_event)
 
-        self._report(progress_cb, 95, "Saving…")
+        self._report(progress_cb, 95, "Saving...")
 
         paths = []
         for i, img in enumerate(images):
