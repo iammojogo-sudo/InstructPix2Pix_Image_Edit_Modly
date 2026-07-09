@@ -211,7 +211,8 @@ class InstructPix2PixGenerator(BaseGenerator):
             ).to(self._clipseg.device)
             with torch.inference_mode():
                 outputs = self._clipseg(**inputs)
-            probs = torch.sigmoid(outputs.logits)
+            probs = torch.sigmoid(outputs.logits).squeeze()
+            probs = probs.unsqueeze(0).unsqueeze(0)
             probs = torch.nn.functional.interpolate(
                 probs, size=(image.height, image.width), mode="bilinear"
             )
