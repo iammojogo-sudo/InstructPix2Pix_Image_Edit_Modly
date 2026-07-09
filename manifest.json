@@ -3,10 +3,10 @@
   "name": "InstructPix2Pix Edit",
   "type": "model",
   "source": "https://github.com/iammojogo-sudo/InstructPix2Pix_Image_Edit_Modly",
-  "description": "Instruction-based image editing with automatic region masking. Upload an image and type what to change (e.g. 'make the pants green'). GroundingDINO + SAM auto-detect the region, then InstructPix2Pix edits only that area — everything else stays pixel-identical. Toggle auto-mask off for global edits.",
-  "version": "2.0.0",
+  "description": "Instruction-based image editing with CLIPSeg auto-masking. Upload an image and describe what to change (e.g. 'make the pants green'). CLIPSeg generates a mask from your text, then only that region is edited — everything else stays pixel-identical.",
+  "version": "3.0.0",
   "author": "iammojogo",
-  "vram_gb": 6,
+  "vram_gb": 5,
   "tags": [
     "image-to-image",
     "image-editing",
@@ -38,13 +38,6 @@
           "type": "bool",
           "default": true,
           "tooltip": "ONLY edit the detected object (OFF = global edit, old behavior)"
-        },
-        {
-          "id": "target",
-          "label": "Target (optional)",
-          "type": "string",
-          "default": "",
-          "tooltip": "Force-detect a specific object (e.g. 'pants'). Leave empty for auto-detect."
         },
         {
           "id": "steps",

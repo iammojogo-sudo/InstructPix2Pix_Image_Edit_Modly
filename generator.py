@@ -15,55 +15,43 @@ from services.generators.base import BaseGenerator, GenerationCancelled
 class InstructPix2PixGenerator(BaseGenerator):
     MODEL_ID = "timbrooks/instruct-pix2pix"
     DISPLAY_NAME = "InstructPix2Pix Edit"
-    VRAM_GB = 6
+    VRAM_GB = 5
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._g_dino = None
-        self._g_dino_processor = None
-        self._sam = None
-        self._sam_processor = None
+        self._clipseg = None
+        self._clipseg_processor = None
 
     def _auto_download(self) -> None:
         from huggingface_hub import snapshot_download
 
-        # Download IP2P model to root of model_dir
+        # Download IP2P model
         self.model_dir.mkdir(parents=True, exist_ok=True)
         snapshot_download(
             repo_id=self.MODEL_ID,
             local_dir=str(self.model_dir),
             ignore_patterns=["*.md", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"],
         )
-        # Remove corrupt safetensors files so loader falls back to .bin
-        for safetensors_file in self.model_dir.rglob("*.safetensors"):
-            bin_file = safetensors_file.with_suffix(".bin")
+        for f in self.model_dir.rglob("*.safetensors"):
+            bin_file = f.with_suffix(".bin")
             if bin_file.exists():
-                ratio = safetensors_file.stat().st_size / bin_file.stat().st_size
+                ratio = f.stat().st_size / bin_file.stat().st_size
                 if ratio < 0.5:
-                    print(f"[_auto_download] Removing corrupt safetensors: {safetensors_file.name} ({safetensors_file.stat().st_size} bytes, {ratio:.1%} of .bin)")
-                    safetensors_file.unlink()
+                    f.unlink()
 
-        # Download G-DINO + SAM to subdirectories
-        repos = {
-            "grounding_dino": "IDEA-Research/grounding-dino-base",
-            "sam": "facebook/sam-vit-base",
-        }
-        for subdir, repo_id in repos.items():
-            target_dir = self.model_dir / subdir
-            if target_dir.exists() and any(target_dir.iterdir()):
-                continue
-            target_dir.mkdir(parents=True, exist_ok=True)
-            snapshot_download(
-                repo_id=repo_id,
-                local_dir=str(target_dir),
-                ignore_patterns=["*.md", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"],
-            )
+        # Download CLIPSeg (text-to-mask model)
+        clipseg_dir = self.model_dir / "clipseg"
+        clipseg_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id="CIDAS/clipseg-rd64-refined",
+            local_dir=str(clipseg_dir),
+            ignore_patterns=["*.md", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"],
+        )
 
     def is_downloaded(self) -> bool:
         ip2p_ok = (self.model_dir / "model_index.json").exists()
-        gd_ok = (self.model_dir / "grounding_dino").exists() and any((self.model_dir / "grounding_dino").iterdir())
-        sam_ok = (self.model_dir / "sam").exists() and any((self.model_dir / "sam").iterdir())
-        return ip2p_ok and gd_ok and sam_ok
+        clipseg_ok = (self.model_dir / "clipseg").exists() and any((self.model_dir / "clipseg").iterdir())
+        return ip2p_ok and clipseg_ok
 
     def load(self) -> None:
         cb = getattr(self, "_progress", None)
@@ -82,28 +70,19 @@ class InstructPix2PixGenerator(BaseGenerator):
         self._pipe.vae.enable_tiling()
         self._pipe.to(device)
 
-        self._report(cb, 40, "Loading GroundingDINO...")
-        from transformers import GroundingDinoForObjectDetection, GroundingDinoProcessor
+        self._report(cb, 50, "Loading CLIPSeg...")
+        from transformers import AutoProcessor, CLIPSegForImageSegmentation
 
-        gd_path = str(self.model_dir / "grounding_dino")
-        self._g_dino = GroundingDinoForObjectDetection.from_pretrained(gd_path, local_files_only=True).to(device)
-        self._g_dino_processor = GroundingDinoProcessor.from_pretrained(gd_path, local_files_only=True)
-
-        self._report(cb, 65, "Loading SAM...")
-        from transformers import SamModel, SamProcessor
-
-        sam_path = str(self.model_dir / "sam")
-        self._sam = SamModel.from_pretrained(sam_path, local_files_only=True).to(device)
-        self._sam_processor = SamProcessor.from_pretrained(sam_path, local_files_only=True)
+        clipseg_path = str(self.model_dir / "clipseg")
+        self._clipseg = CLIPSegForImageSegmentation.from_pretrained(clipseg_path, local_files_only=True).to(device)
+        self._clipseg_processor = AutoProcessor.from_pretrained(clipseg_path, local_files_only=True)
 
         self._report(cb, 100, "Ready")
 
     def unload(self) -> None:
         self._pipe = None
-        self._g_dino = None
-        self._g_dino_processor = None
-        self._sam = None
-        self._sam_processor = None
+        self._clipseg = None
+        self._clipseg_processor = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -124,7 +103,7 @@ class InstructPix2PixGenerator(BaseGenerator):
 
         steps = int(params.get("steps", 30))
         guidance_scale = float(params.get("guidance_scale", 7.5))
-        image_guidance = float(params.get("image_guidance_scale", 2.5))
+        image_guidance = float(params.get("image_guidance_scale", 1.5))
         num_images = int(params.get("num_images", 1))
         seed = int(params.get("seed", 0))
 
@@ -141,26 +120,14 @@ class InstructPix2PixGenerator(BaseGenerator):
         src = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
         orig_size = src.size
 
-        # ---- Step 1: Auto-mask (if enabled) ----
+        # ---- Step 1: Auto-mask via CLIPSeg ----
         mask_img = None
         if auto_mask:
-            if manual_target:
-                boxes = self._detect(src, manual_target, cancel_event, threshold=0.1)
-            else:
-                boxes = self._detect(src, prompt, cancel_event, threshold=0.15)
-                if not boxes:
-                    target = self._extract_target(prompt)
-                    if target and target != prompt:
-                        boxes = self._detect(src, target, cancel_event, threshold=0.05)
-
-            if boxes:
-                self._report(progress_cb, 10, "Segmenting region...")
-                mask_np = self._segment(src, boxes[0], cancel_event)
-                mask_img = PILImage.fromarray(mask_np, mode="L")
-                # Soften mask edge for natural compositing
-                mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=3))
-            else:
-                self._report(progress_cb, 10, "No mask — full image edit")
+            search_text = manual_target or prompt
+            self._report(progress_cb, 5, f"Generating mask for '{search_text}'...")
+            mask_np = self._text_to_mask(src, search_text, cancel_event)
+            mask_img = PILImage.fromarray(mask_np, mode="L")
+            mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=5))
 
         # ---- Step 2: Run IP2P (global edit) ----
         self._report(progress_cb, 15, "Editing...")
@@ -211,72 +178,25 @@ class InstructPix2PixGenerator(BaseGenerator):
             return paths[0]
         return paths
 
-    @staticmethod
-    def _extract_target(prompt: str) -> str:
-        prompt = prompt.strip().lower()
-        skip_words = [
-            "the", "my", "this", "that", "his", "her", "their", "your", "our", "its", "a", "an",
-        ]
-        skip_words.sort(key=len, reverse=True)
-        skip = r"(?:" + "|".join(skip_words) + r")"
-        patterns = [
-            rf"(?:make|turn|change|paint|color|replace)\s+{skip}\s+(\w+)",
-            rf"(?:make|turn|change|paint|color|replace)\s+(\w+)",
-            rf"(\w+)\s+(?:into|to|as)\s+\w+",
-        ]
-        for pat in patterns:
-            m = re.search(pat, prompt)
-            if m:
-                return m.group(1)
-        return prompt.split()[0] if prompt else ""
-
-    def _detect(
-        self, image: PILImage.Image, text: str, cancel_event: threading.Event,
-        threshold: float = 0.2,
-    ) -> list:
-        self._check_cancelled(cancel_event)
-        inputs = self._g_dino_processor(
-            images=image, text=text, return_tensors="pt"
-        ).to(self._g_dino.device)
-        with torch.inference_mode():
-            outputs = self._g_dino(**inputs)
-
-        h, w = image.size[1], image.size[0]
-        target_size = torch.tensor([[h, w]], device=self._g_dino.device)
-        results = self._g_dino_processor.post_process_grounded_object_detection(
-            outputs,
-            input_ids=inputs.input_ids,
-            threshold=threshold,
-            text_threshold=threshold,
-            target_sizes=target_size,
-        )
-
-        boxes = results[0].get("boxes")
-        scores = results[0].get("scores")
-        if boxes is None or len(boxes) == 0:
-            return []
-        idx = scores.argsort(descending=True)
-        return [boxes[i].tolist() for i in idx]
-
-    def _segment(
-        self, image: PILImage.Image, box: list, cancel_event: threading.Event
+    def _text_to_mask(
+        self, image: PILImage.Image, text: str, cancel_event: threading.Event
     ) -> np.ndarray:
         self._check_cancelled(cancel_event)
-        inputs = self._sam_processor(
-            images=image, input_boxes=[[box]], return_tensors="pt"
-        ).to(self._sam.device)
+        inputs = self._clipseg_processor(
+            text=[text], images=[image], padding=True, return_tensors="pt"
+        ).to(self._clipseg.device)
 
         with torch.inference_mode():
-            outputs = self._sam(**inputs)
+            outputs = self._clipseg(**inputs)
 
-        masks = self._sam_processor.post_process_masks(
-            outputs.pred_masks.cpu(),
-            inputs["original_sizes"].cpu(),
-            inputs["reshaped_input_sizes"].cpu(),
-        )
-        best_idx = outputs.iou_scores[0].argmax().item()
-        mask_np = (masks[0][0, best_idx].numpy() * 255).astype(np.uint8)
-        return mask_np
+        # logits shape: (1, 1, H, W) — squeeze and sigmoid to [0,1]
+        probs = torch.sigmoid(outputs.logits).squeeze().cpu().numpy()
+        # Threshold: 0.3 gives a good balance
+        mask = (probs > 0.3).astype(np.uint8) * 255
+        # Resize back to original image size (CLIPSeg may output at lower res)
+        mask_pil = PILImage.fromarray(mask, mode="L")
+        mask_pil = mask_pil.resize(image.size, PILImage.LANCZOS)
+        return np.array(mask_pil)
 
     def _report(self, cb, pct, msg):
         if cb:
