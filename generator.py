@@ -110,6 +110,7 @@ class InstructPix2PixGenerator(BaseGenerator):
         auto_mask = params.get("auto_mask", "on") == "on"
         mask_threshold = float(params.get("mask_threshold", 0.3))
         color_tolerance = int(params.get("color_tolerance", 0))
+        mask_negative = params.get("mask_negative", "").strip() or None
 
         src = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
         orig_size = src.size
@@ -120,7 +121,7 @@ class InstructPix2PixGenerator(BaseGenerator):
         if auto_mask:
             target = params.get("target", "").strip() or self._extract_target(prompt)
             self._report(progress_cb, 5, f"Generating mask for '{target}'...")
-            probs = self._text_to_mask(src, target, cancel_event)
+            probs = self._text_to_mask(src, target, cancel_event, negative=mask_negative)
 
             if color_tolerance > 0:
                 mask_np = self._refine_mask_by_color(src_array, probs, color_tolerance)
@@ -199,22 +200,33 @@ class InstructPix2PixGenerator(BaseGenerator):
         return prompt.split()[0] if prompt else ""
 
     def _text_to_mask(
-        self, image: PILImage.Image, text: str, cancel_event: threading.Event
+        self, image: PILImage.Image, text: str, cancel_event: threading.Event,
+        negative: Optional[str] = None,
     ) -> np.ndarray:
         self._check_cancelled(cancel_event)
+        texts = [text]
+        if negative:
+            texts.append(negative)
+
         inputs = self._clipseg_processor(
-            text=[text], images=[image], padding=True, return_tensors="pt"
+            text=texts, images=[image], padding=True, return_tensors="pt"
         ).to(self._clipseg.device)
 
         with torch.inference_mode():
             outputs = self._clipseg(**inputs)
 
-        probs_tensor = torch.sigmoid(outputs.logits).squeeze()
-        probs_tensor = probs_tensor.unsqueeze(0).unsqueeze(0)
-        probs_tensor = torch.nn.functional.interpolate(
-            probs_tensor, size=(image.height, image.width), mode="bilinear"
+        # outputs.logits: [1, N, H', W']  where N = len(texts)
+        logits = outputs.logits.squeeze(0)  # [N, H', W']
+
+        if negative and len(texts) > 1:
+            logits = logits[0] - logits[1]
+
+        probs = torch.sigmoid(logits)
+        probs = probs.unsqueeze(0).unsqueeze(0)
+        probs = torch.nn.functional.interpolate(
+            probs, size=(image.height, image.width), mode="bilinear"
         )
-        return probs_tensor.squeeze().cpu().numpy().astype(np.float32)
+        return probs.squeeze().cpu().numpy().astype(np.float32)
 
     @staticmethod
     def _refine_mask_by_color(

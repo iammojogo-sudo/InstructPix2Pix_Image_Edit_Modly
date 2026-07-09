@@ -4,7 +4,7 @@
   "type": "model",
   "source": "https://github.com/iammojogo-sudo/InstructPix2Pix_Image_Edit_Modly",
   "description": "Instruction-based image editing with CLIPSeg auto-masking. Upload an image and describe what to change (e.g. 'make the pants green'). CLIPSeg generates a mask from your text, then only that region is edited — everything else stays pixel-identical.",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "author": "iammojogo",
   "vram_gb": 5,
   "tags": [
@@ -67,6 +67,13 @@
           "min": 0,
           "max": 100,
           "tooltip": "Snap mask to matching pixels. 0=disabled, 20-40 for flat-color characters (Roblox)."
+        },
+        {
+          "id": "mask_negative",
+          "label": "Exclude (optional)",
+          "type": "string",
+          "default": "",
+          "tooltip": "Exclude this concept (e.g. 'arms' to isolate hands from arms, 'background' to cut out subject)"
         },
         {
           "id": "steps",
