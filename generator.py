@@ -108,16 +108,25 @@ class InstructPix2PixGenerator(BaseGenerator):
         seed = int(params.get("seed", 0))
 
         auto_mask = params.get("auto_mask", "on") == "on"
+        mask_threshold = float(params.get("mask_threshold", 0.3))
+        color_tolerance = int(params.get("color_tolerance", 0))
 
         src = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
         orig_size = src.size
+        src_array = np.array(src)
 
         # ---- Step 1: Auto-mask via CLIPSeg ----
         mask_img = None
         if auto_mask:
             target = params.get("target", "").strip() or self._extract_target(prompt)
             self._report(progress_cb, 5, f"Generating mask for '{target}'...")
-            mask_np = self._text_to_mask(src, target, cancel_event)
+            probs = self._text_to_mask(src, target, cancel_event)
+
+            if color_tolerance > 0:
+                mask_np = self._refine_mask_by_color(src_array, probs, color_tolerance)
+            else:
+                mask_np = (probs > mask_threshold).astype(np.uint8) * 255
+
             mask_img = PILImage.fromarray(mask_np, mode="L")
             mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=5))
 
@@ -194,26 +203,38 @@ class InstructPix2PixGenerator(BaseGenerator):
     ) -> np.ndarray:
         self._check_cancelled(cancel_event)
         inputs = self._clipseg_processor(
-            text=[text], images=[image], padding="max_length", return_tensors="pt"
-        ).to(self._clipseg.device)
-        self, image: PILImage.Image, text: str, cancel_event: threading.Event
-    ) -> np.ndarray:
-        self._check_cancelled(cancel_event)
-        inputs = self._clipseg_processor(
             text=[text], images=[image], padding=True, return_tensors="pt"
         ).to(self._clipseg.device)
 
         with torch.inference_mode():
             outputs = self._clipseg(**inputs)
 
-        # logits shape: (1, 1, H, W) — squeeze and sigmoid to [0,1]
-        probs = torch.sigmoid(outputs.logits).squeeze().cpu().numpy()
-        # Threshold: 0.3 gives a good balance
-        mask = (probs > 0.3).astype(np.uint8) * 255
-        # Resize back to original image size (CLIPSeg may output at lower res)
-        mask_pil = PILImage.fromarray(mask, mode="L")
-        mask_pil = mask_pil.resize(image.size, PILImage.LANCZOS)
-        return np.array(mask_pil)
+        probs_tensor = torch.sigmoid(outputs.logits).squeeze()
+        probs_tensor = probs_tensor.unsqueeze(0).unsqueeze(0)
+        probs_tensor = torch.nn.functional.interpolate(
+            probs_tensor, size=(image.height, image.width), mode="bilinear"
+        )
+        return probs_tensor.squeeze().cpu().numpy().astype(np.float32)
+
+    @staticmethod
+    def _refine_mask_by_color(
+        src_array: np.ndarray, probs: np.ndarray, tolerance: int
+    ) -> np.ndarray:
+        region = probs > 0.05
+        if not region.any():
+            return (probs > 0.3).astype(np.uint8) * 255
+
+        high_conf = probs > max(np.percentile(probs[region], 90), 0.3)
+        if high_conf.sum() < 10:
+            return (probs > 0.3).astype(np.uint8) * 255
+
+        target_color = np.median(src_array[high_conf], axis=0).astype(int)
+        color_dist = np.max(
+            np.abs(src_array.astype(int) - target_color[None, None, :]), axis=2
+        )
+        color_match = color_dist < tolerance
+        refined = color_match & region
+        return (refined.astype(np.uint8) * 255)
 
     def _report(self, cb, pct, msg):
         if cb:

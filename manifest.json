@@ -51,6 +51,24 @@
           "tooltip": "Override: type the object name directly (e.g. 'skin', 'shirt'). Leave empty to auto-extract from instruction."
         },
         {
+          "id": "mask_threshold",
+          "label": "Mask Sensitivity",
+          "type": "float",
+          "default": 0.3,
+          "min": 0.05,
+          "max": 0.9,
+          "tooltip": "Lower = more sensitive mask (catches faint regions). 0.3 default, 0.05 for blocky/stylized characters."
+        },
+        {
+          "id": "color_tolerance",
+          "label": "Color Snap (0=off)",
+          "type": "int",
+          "default": 0,
+          "min": 0,
+          "max": 100,
+          "tooltip": "Snap mask to matching pixels. 0=disabled, 20-40 for flat-color characters (Roblox)."
+        },
+        {
           "id": "steps",
           "label": "Steps",
           "type": "int",
